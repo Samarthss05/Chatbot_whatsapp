@@ -1,159 +1,154 @@
-import crypto from 'node:crypto';
-import { cfg } from './config.js';
-import { logMessage } from './store.js';
-
-const base = () =>
-  `https://graph.facebook.com/${cfg.wa.graphVersion}/${cfg.wa.phoneNumberId}/messages`;
-
-// WhatsApp hard limits. Exceeding any of these makes the API reject the message.
-const LIM = { button: 20, rowTitle: 24, rowDesc: 72, sectionTitle: 24, body: 1024, header: 60 };
-const cut = (s, n) => {
-  const t = String(s ?? '');
-  return t.length <= n ? t : t.slice(0, n - 1).trimEnd() + '…';
-};
-
-async function send(payload, waId, logBody) {
-  if (process.env.DRY_RUN === '1') {
-    console.log('[dry-run] ->', waId, JSON.stringify(payload.interactive ?? payload.text ?? payload));
-    logMessage(null, waId, 'out', logBody ?? JSON.stringify(payload));
-    return { dryRun: true };
-  }
-  const res = await fetch(base(), {
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${cfg.wa.token}`,
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify(payload),
-  });
-  const json = await res.json().catch(() => ({}));
-  if (!res.ok) {
-    console.error('[whatsapp] send failed', res.status, JSON.stringify(json));
-    throw new Error(`WhatsApp send failed: ${res.status}`);
-  }
-  logMessage(json?.messages?.[0]?.id, waId, 'out', logBody ?? JSON.stringify(payload));
-  return json;
+import crypto from "node:crypto";
+import { cfg } from "./config.js";
+import { request } from "./http.js";
+export function verifySignature(rawBody, header) {
+  if (
+    !cfg.wa.appSecret ||
+    !Buffer.isBuffer(rawBody) ||
+    typeof header !== "string"
+  )
+    return false;
+  const expected =
+    "sha256=" +
+    crypto.createHmac("sha256", cfg.wa.appSecret).update(rawBody).digest("hex");
+  const a = Buffer.from(expected),
+    b = Buffer.from(header);
+  return a.length === b.length && crypto.timingSafeEqual(a, b);
 }
-
-export function sendText(to, body) {
-  return send(
-    {
-      messaging_product: 'whatsapp',
-      recipient_type: 'individual',
-      to,
-      type: 'text',
-      text: { preview_url: false, body: cut(body, LIM.body) },
-    },
+const cut = (s, n) =>
+  Array.from(String(s || ""))
+    .slice(0, n)
+    .join("");
+export function textPayload(to, body) {
+  if (!String(body).trim() || Array.from(body).length > 4096)
+    throw new Error("Message must contain 1–4096 characters");
+  return {
+    messaging_product: "whatsapp",
+    recipient_type: "individual",
     to,
-    body
-  );
+    type: "text",
+    text: { preview_url: false, body },
+  };
 }
-
-/**
- * Interactive list. One tap inside the chat beats a link to a web form,
- * which is the whole point for this audience.
- * rows: [{ id, title, description }]
- */
-export function sendList(to, { header, body, footer, button, sectionTitle, rows }) {
-  const payload = {
-    messaging_product: 'whatsapp',
-    recipient_type: 'individual',
+export function listPayload(to, { body, rows, header, button, sectionTitle }) {
+  if (!rows.length || rows.length > 10) throw new Error("Invalid list size");
+  return {
+    messaging_product: "whatsapp",
     to,
-    type: 'interactive',
+    type: "interactive",
     interactive: {
-      type: 'list',
-      body: { text: cut(body, LIM.body) },
+      type: "list",
+      header: { type: "text", text: cut(header, 60) },
+      body: { text: cut(body, 1024) },
       action: {
-        button: cut(button, LIM.button),
+        button: cut(button, 20),
         sections: [
           {
-            title: cut(sectionTitle, LIM.sectionTitle),
-            rows: rows.slice(0, 10).map(r => ({
+            title: cut(sectionTitle, 24),
+            rows: rows.map((r) => ({
               id: r.id,
-              title: cut(r.title, LIM.rowTitle),
-              ...(r.description ? { description: cut(r.description, LIM.rowDesc) } : {}),
+              title: cut(r.title, 24),
+              description: cut(r.description, 72),
             })),
           },
         ],
       },
     },
   };
-  if (header) payload.interactive.header = { type: 'text', text: cut(header, LIM.header) };
-  if (footer) payload.interactive.footer = { text: cut(footer, 60) };
-  return send(payload, to, body);
 }
-
-export function sendButtons(to, { body, buttons }) {
-  return send(
-    {
-      messaging_product: 'whatsapp',
-      recipient_type: 'individual',
-      to,
-      type: 'interactive',
-      interactive: {
-        type: 'button',
-        body: { text: cut(body, LIM.body) },
-        action: {
-          buttons: buttons.slice(0, 3).map(b => ({
-            type: 'reply',
-            reply: { id: b.id, title: cut(b.title, LIM.button) },
-          })),
-        },
+export function buttonsPayload(to, body, buttons) {
+  return {
+    messaging_product: "whatsapp",
+    to,
+    type: "interactive",
+    interactive: {
+      type: "button",
+      body: { text: cut(body, 1024) },
+      action: {
+        buttons: buttons.slice(0, 3).map((b) => ({
+          type: "reply",
+          reply: { id: b.id, title: cut(b.title, 20) },
+        })),
       },
     },
-    to,
-    body
+  };
+}
+export async function deliver(payload, jobId, attempt) {
+  if (cfg.dryRun) return { messages: [{ id: `dry-${jobId}-${attempt}` }] };
+  return request(
+    `https://graph.facebook.com/${cfg.wa.graphVersion}/${cfg.wa.phoneNumberId}/messages`,
+    {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${cfg.wa.token}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        ...payload,
+        biz_opaque_callback_data: `job:${jobId}:${attempt}`,
+      }),
+    },
+    "WhatsApp",
   );
 }
-
-export function markRead(messageId) {
-  if (process.env.DRY_RUN === '1' || !messageId) return Promise.resolve();
-  return fetch(base(), {
-    method: 'POST',
-    headers: { Authorization: `Bearer ${cfg.wa.token}`, 'Content-Type': 'application/json' },
-    body: JSON.stringify({ messaging_product: 'whatsapp', status: 'read', message_id: messageId }),
-  }).catch(() => {});
-}
-
-/** Meta signs every webhook. Reject anything that is not genuinely from them. */
-export function verifySignature(rawBody, header) {
-  if (!cfg.wa.appSecret) return true; // warned about at startup
-  if (!header) return false;
-  const expected =
-    'sha256=' + crypto.createHmac('sha256', cfg.wa.appSecret).update(rawBody).digest('hex');
-  const a = Buffer.from(expected);
-  const b = Buffer.from(header);
-  return a.length === b.length && crypto.timingSafeEqual(a, b);
-}
-
-/** Flattens Meta's deeply nested webhook into something workable. */
-export function parseInbound(body) {
-  const out = [];
-  for (const entry of body?.entry ?? []) {
-    for (const change of entry?.changes ?? []) {
-      const value = change?.value;
-      const profileName = value?.contacts?.[0]?.profile?.name;
-      for (const m of value?.messages ?? []) {
-        const base = {
+export function parseWebhook(body) {
+  const messages = [],
+    statuses = [];
+  if (body?.object !== "whatsapp_business_account")
+    return { messages, statuses };
+  for (const entry of Array.isArray(body.entry) ? body.entry : [])
+    for (const change of Array.isArray(entry.changes) ? entry.changes : []) {
+      const v = change.value;
+      if (
+        change.field !== "messages" ||
+        v?.metadata?.phone_number_id !== cfg.wa.phoneNumberId
+      )
+        continue;
+      for (const m of Array.isArray(v.messages) ? v.messages : []) {
+        if (
+          typeof m.id !== "string" ||
+          m.id.length > 256 ||
+          !/^\d{7,20}$/.test(m.from || "") ||
+          !/^\d+$/.test(String(m.timestamp || ""))
+        )
+          continue;
+        const contact = Array.isArray(v.contacts)
+          ? v.contacts.find((c) => c.wa_id === m.from)
+          : null;
+        const reply = m.interactive?.list_reply || m.interactive?.button_reply;
+        const rawReply = reply?.id || m.button?.payload;
+        messages.push({
           id: m.id,
           from: m.from,
-          name: profileName,
-          timestamp: m.timestamp,
+          name: cut(contact?.profile?.name, 120),
           type: m.type,
-        };
-        if (m.type === 'text') {
-          out.push({ ...base, text: m.text?.body ?? '' });
-        } else if (m.type === 'interactive') {
-          const i = m.interactive;
-          const reply = i?.list_reply ?? i?.button_reply;
-          out.push({ ...base, replyId: reply?.id, text: reply?.title ?? '' });
-        } else if (m.type === 'audio' || m.type === 'voice') {
-          out.push({ ...base, text: '', audioId: m.audio?.id });
-        } else {
-          out.push({ ...base, text: '' });
-        }
+          timestamp: Number(m.timestamp) * 1000,
+          text: cut(m.text?.body || reply?.title || m.button?.text || "", 4096),
+          replyId:
+            typeof rawReply === "string" && rawReply.length <= 256
+              ? rawReply
+              : null,
+        });
       }
+      for (const s of Array.isArray(v.statuses) ? v.statuses : [])
+        if (
+          typeof s.id === "string" &&
+          ["sent", "delivered", "read", "failed"].includes(s.status)
+        ) {
+          statuses.push({
+            id: s.id,
+            status: s.status,
+            timestamp: Number(s.timestamp) * 1000 || Date.now(),
+            errorCode: s.errors?.[0]?.code ? String(s.errors[0].code) : null,
+            jobId: /^job:\d+:\d+$/.test(s.biz_opaque_callback_data || "")
+              ? Number(s.biz_opaque_callback_data.split(":")[1])
+              : null,
+            attempt: /^job:\d+:\d+$/.test(s.biz_opaque_callback_data || "")
+              ? Number(s.biz_opaque_callback_data.split(":")[2])
+              : null,
+          });
+        }
     }
-  }
-  return out;
+  return { messages, statuses };
 }
+export const parseInbound = (body) => parseWebhook(body).messages;

@@ -1,193 +1,192 @@
-# Ledger booking bot
+# Ledger Visit Desk
 
-When a shop owner scans the poster QR and messages **9610 9538**, this books the
-20-minute onboarding visit without you touching your phone.
+A multilingual WhatsApp appointment service for Ledger/ReStock, with a private operator dashboard. It schedules shop visits, records shop details, synchronizes Google Calendar, and hands conversations to a person when needed.
 
-It speaks English, Mandarin and Malay, picks the language from the poster they
-scanned, offers real slots from your Google Calendar, creates the event, and
-hands the conversation to you the moment anyone says something off-script.
+**Core booking works without an LLM.** OpenRouter is an optional interpreter for free text; it cannot bypass appointment rules, call arbitrary tools, or invent customer-facing answers.
 
----
+## Try it safely
 
-## What it actually does
+Use Node.js 22 (see `.nvmrc`).
 
-```
-Owner scans QR, message arrives ("Hi Ledger, I saw your poster...")
-        │
-        ├─ language detected from their first message
-        │
-        ▼
-Bot replies with 3 slots as a tappable list  ← one tap, no web form
-        │
-        ├─ taps a slot ──▶ Calendar event created
-        │                  "What's your shop name and unit number?"
-        │                        │
-        │                        ▼
-        │                  Saved, event renamed, you get a ping. Bot stops.
-        │
-        ├─ taps "another time" ──▶ handed to you
-        └─ types anything else ──▶ classified, then usually handed to you
+```sh
+npm ci
+npm run demo
 ```
 
-**Two bot turns, maximum.** After that a human takes over and the bot never
-speaks to that person again. An owner who wanted two students and got a
-chatbot is an owner you lost.
+Open **http://127.0.0.1:3000**. Demo access token:
 
----
-
-## Setup
-
-### 1. Install
-
-```bash
-npm install
-cp .env.example .env
+```text
+ledger-demo-access-token-local-only
 ```
 
-### 2. WhatsApp Cloud API
+The demo binds only to your computer, uses synthetic contacts in `data/demo.db`, and disables **all** external services—even when a real `.env` is present. Set `DEMO_PORT=3185` if port 3000 is occupied. Demo contacts persist across restarts. For a fresh disposable run without writing a database, use `npm run simulate`.
 
-At [developers.facebook.com](https://developers.facebook.com): create an app,
-add the **WhatsApp** product, and from **API Setup** copy into `.env`:
+## What is included
 
-- `WHATSAPP_TOKEN` (use a permanent System User token for production, not the 24h test one)
-- `WHATSAPP_PHONE_NUMBER_ID`
-- `WHATSAPP_APP_SECRET` from **App Settings → Basic**
+- English, Mandarin, and Malay conversation copy and appointment labels.
+- Slot lists with expiring, contact-specific selection tokens.
+- Atomic local reservations, overlap checks, and configurable travel buffers.
+- Confirmed cancellations; rescheduling keeps the original reservation until its replacement succeeds.
+- Separate appointment and conversation state: human takeover never releases a reservation.
+- Persistent inbound and outbound queues, bounded exponential retries, failed-action recovery, and a single-worker lease.
+- Calendar creation with deterministic event IDs and duplicate reconciliation after ambiguous network failures.
+- An operator dashboard: searchable contacts, conversation history, delivery status, personal replies, takeover/resume, private notes, appointments, notifications, activity, and CSV export.
+- Opt-out handling before booking, explicit re-entry through START/BOOK, and no operator override of opt-out.
+- Strict webhook signatures, business-phone filtering, header-only admin authentication, security headers, request limits, and login throttling.
+- Safe simulation, schema migration, online SQLite backups, tests, Docker configuration, and CI.
 
-Invent any long random string for `WHATSAPP_VERIFY_TOKEN`.
+## Live setup
 
-> Business verification takes one to two weeks. Start it now. It is task **A04**
-> on the launch plan and it gates everything.
+1. `cp .env.example .env` and fill in the WhatsApp Cloud API credentials.
+2. Generate separate random values for `ADMIN_TOKEN` and `WHATSAPP_VERIFY_TOKEN`:
 
-### 3. Expose the webhook
+   ```sh
+   node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"
+   ```
 
-Locally:
+3. Supply `WHATSAPP_APP_SECRET`. Signatures are mandatory outside the isolated demo. Placeholder credentials are rejected for admin and verification tokens.
+4. Run `npm start`. Default listener: `127.0.0.1:3000`.
+5. Expose `/webhook` using HTTPS through a reverse proxy or a development tunnel. Configure Meta's callback to `https://your-host/webhook`, use your verification token, and subscribe to messages. Keep the operator dashboard behind your private network or additional identity-aware access where practical.
+6. Open the dashboard and sign in with `ADMIN_TOKEN`. The token lives only in the tab's memory; a browser refresh signs you out.
+7. Test one real inbound conversation, a slot selection, shop details, cancellation, handover, and delivery-status callbacks before launching.
 
-```bash
-npx ngrok http 3000
+`npm start` needs valid WhatsApp and admin configuration. `npm run demo` needs no credentials. Never put credentials into Git, browser URLs, screenshots, or public chat messages.
+
+### Google Calendar
+
+Without Google credentials, reservations are stored locally and external calendar availability is not known. With Google enabled, availability errors hand the conversation to a person; failed event creation remains pending and is visible in **Activity & recovery**. A customer receives confirmation only after the Calendar operation succeeds.
+
+Enable the Calendar API and create an OAuth web client. Register this exact redirect URI:
+
+```text
+http://127.0.0.1:5555/callback
 ```
 
-Then in **WhatsApp → Configuration → Webhook**:
+Set `GOOGLE_CLIENT_ID` and `GOOGLE_CLIENT_SECRET`, run `npm run auth:google`, and store the resulting refresh token in `GOOGLE_REFRESH_TOKEN`. Use an account authorized to read availability and manage events in `GOOGLE_CALENDAR_ID`. The helper requests event and free/busy scopes, validates OAuth state, binds to loopback, and expires after five minutes. Google consent-screen testing status can affect refresh-token lifetime; configure your Google project appropriately for continued operation.
 
-- Callback URL: `https://your-ngrok-url/webhook`
-- Verify token: whatever you put in `.env`
-- Subscribe to the **messages** field
+### Add OpenRouter later
 
-### 4. Google Calendar (optional)
+Set both values and restart:
 
-Skip this and the bot still works, it just offers slots without checking whether
-you are actually free.
-
-To wire it up: enable the Google Calendar API, create an OAuth client with
-redirect `http://localhost:5555/callback`, put the id and secret in `.env`, then:
-
-```bash
-npm run auth:google
+```dotenv
+OPENROUTER_API_KEY=your-secret-key
+OPENROUTER_MODEL=your-selected-model-id
 ```
 
-Paste the printed refresh token into `GOOGLE_REFRESH_TOKEN`.
+Choose an available model/provider supporting strict JSON-schema outputs. No stale model is hard-coded. Requests carry bounded recent conversation context, use a timeout, and validate language, intent, field types, and confidence. Low-confidence or unavailable AI falls back to deterministic commands or a person. The model never directly sends replies or modifies appointments. Review the messages sent to OpenRouter and its provider data policies before enabling it for customer conversations.
 
-### 5. OpenRouter (optional)
+### Team notifications
 
-Classifies free text so the bot knows the difference between "how much ah" and
-"not interested". Without a key, every free-text message goes straight to you,
-which is safe but noisier.
+Dashboard notifications always work. Optionally set `NOTIFY_WEBHOOK` to an HTTPS automation endpoint accepting `{ "text": "...", "wa_id": "..." }`. Failed requests are retried and eventually shown for review. Use an adapter such as your own n8n workflow for services with different payload formats.
 
-Get a key at [openrouter.ai/keys](https://openrouter.ai/keys) and put it in
-`.env` as `OPENROUTER_API_KEY`. **Never paste a key into a chat, a commit, or a
-screenshot.** If one leaks, revoke it on that page immediately.
+`OWNER_WHATSAPP`, if set, identifies your personal number so its incoming messages bypass customer booking automation. This version does not rely on WhatsApp-to-owner notifications.
 
-### 6. Run
+## Booking settings
 
-```bash
-npm start
+| Setting             | Default             | Meaning                                   |
+| ------------------- | ------------------- | ----------------------------------------- |
+| `TIMEZONE`          | `Asia/Singapore`    | Scheduling and display timezone           |
+| `SLOT_TIMES`        | `14:00,15:00,16:00` | Local start times                         |
+| `SLOT_MINUTES`      | `20`                | Visit duration                            |
+| `BUFFER_MINUTES`    | `10`                | Minimum gap around a visit                |
+| `BOOKING_DAYS`      | `1,2,3,4,5,6`       | ISO weekdays, Monday = 1                  |
+| `LOOKAHEAD_DAYS`    | `6`                 | Today through six days ahead              |
+| `MIN_LEAD_HOURS`    | `3`                 | Minimum notice before a visit             |
+| `OFFER_TTL_MINUTES` | `30`                | Slot-list validity                        |
+| `JOB_MAX_ATTEMPTS`  | `5`                 | Automatic attempts before operator review |
+| `WORKER_POLL_MS`    | `500`               | Background processing interval            |
+
+Commands include BOOK/START, RESCHEDULE, CANCEL, HUMAN, and STOP, with common Mandarin and Malay equivalents. Customers can switch language with English, 中文, or Bahasa Melayu. Cancellation requires a confirmation button. Shop details require both a name and address; repeated unclear answers are handed to a person.
+
+## How it works
+
+```text
+Meta webhook → signature + phone validation → durable inbox → immediate HTTP 200
+                                                 ↓
+                               single worker / conversation decisions
+                                                 ↓
+                          database transaction: state + reservation + outbox
+                                                 ↓
+                       Calendar jobs / WhatsApp jobs / notification jobs
+                                                 ↓
+                                delivery status + audit + operator desk
 ```
 
----
+The database transaction commits conversation changes and outbound work together. A crash cannot commit a state change while losing its queued reply. Calendar jobs use stable event IDs so a retry can reconcile an already-created event. Overlap checks run inside an immediate SQLite transaction. Incoming message IDs are unique; webhook retries do not restart completed conversations.
 
-## Day to day
+Appointments use `pending → confirmed → cancel_pending → cancelled`, with reservations held during pending operations. Conversation states independently describe choosing a slot, waiting for details, booked, human takeover, opt-out, or cancellation.
 
-```bash
-npm run leads        # the pipeline as a table
-npm run simulate     # drive the whole conversation without touching WhatsApp
+### Source map
+
+| Location                             | Purpose                                                        |
+| ------------------------------------ | -------------------------------------------------------------- |
+| `src/server.js`, `src/app.js`        | Startup, shutdown, HTTP routes, security, operator API         |
+| `src/store.js`                       | Schema, migration, transactions, reservations, jobs, audit     |
+| `src/worker.js`                      | Single-worker lease, delivery, retries, recovery               |
+| `src/flow.js`                        | Conversation and appointment transitions                       |
+| `src/slots.js`, `src/copy.js`        | Scheduling, timezone labels, multilingual copy                 |
+| `src/calendar.js`, `src/whatsapp.js` | Provider integrations                                          |
+| `src/brain.js`                       | Deterministic rules and optional structured LLM classification |
+| `src/messaging.js`, `src/notify.js`  | Queue replies and team notifications                           |
+| `public/`                            | Operator dashboard, no external frontend dependencies          |
+| `scripts/`                           | Demo, simulation, Google authorization, backup, syntax checks  |
+| `test/`                              | Core, HTTP, provider-failure, migration, and backup tests      |
+
+## API
+
+Every `/api/*` route requires `x-admin-token: <ADMIN_TOKEN>`. Do not put the token in query strings. No browser cross-origin API access is enabled.
+
+- `GET /health` — liveness.
+- `GET /ready` — database access and worker readiness.
+- `GET/POST /webhook` — Meta verification and delivery.
+- `GET /api/overview`, `/api/leads`, `/api/leads/:id` — dashboard data.
+- `POST /api/leads/:id/takeover`, `/resume`, `/reply`, `/notes` — operator actions.
+- `POST /api/bookings/:id/cancel` — request calendar-aware cancellation.
+- `GET /api/jobs`; `POST /api/jobs/:id/retry` — review and retry failed actions.
+- `GET /api/activity`, `/api/export` — activity and contacts export.
+- `POST /api/notifications/:id/read` — acknowledge a team notification.
+- `GET /leads` — legacy header-authenticated listing, capped at 1,000 rows.
+
+## Deploy and operate
+
+```sh
+npm run check
+npm test
+npm run simulate
+npm audit --omit=dev
+# After configuring .env:
+docker compose up --build -d
 ```
 
-`GET /leads` returns the same data as JSON, with `x-admin-token: <ADMIN_TOKEN>`.
+The container runs as a non-root user, persists SQLite on a named volume, and publishes port 3000 only to the host's loopback interface. Put an HTTPS reverse proxy in front of it. Configure real secrets, monitor `/ready`, and arrange off-host encrypted backups. Docker and GitHub Actions configurations are provided; real provider credentials and your hosting environment still need end-to-end validation.
 
-### Getting notified
+**Run exactly one application instance per database on local persistent storage.** The worker lease prevents a second active worker and recovers interrupted jobs on restart. After an unclean shutdown, an unexpired lease can delay startup for up to 60 seconds. Do not put the database on a network filesystem or run independent replicas with separate databases. For multiple workers or locations, move reservations and queues to a shared transactional database first.
 
-Console always gets it. Two better options:
+### Upgrade from version 1
 
-- `NOTIFY_WEBHOOK=<url>` posts JSON to Slack, Discord, Telegram or n8n. Most reliable.
-- WhatsApp to your own number works only if you messaged the business number in
-  the last 24 hours, so treat it as a bonus rather than the channel you rely on.
+Back up the old database before starting version 2. Startup adds tables/columns and migrates legacy appointment fields into independent reservations, including appointments on conversations already handed to a person. Existing leads, messages, and legacy offers are retained. Old offer buttons are deliberately no longer accepted; customers can request fresh times. Review migrated appointments and configure the new admin token requirements. Do not run version 1 and version 2 against the same live database.
 
----
+### Backups and recovery
 
-## Booking rules
-
-Set in `.env`:
-
-| Variable | Default | Why |
-|---|---|---|
-| `SLOT_TIMES` | `14:00,15:00,16:00` | 2 to 4pm is when owners are free. Not lunch. |
-| `SLOT_MINUTES` | `20` | The onboarding visit length |
-| `BOOKING_DAYS` | `1,2,3,4,5,6` | Mon to Sat. Shops open Saturday. |
-| `LOOKAHEAD_DAYS` | `6` | How far ahead to offer |
-| `MIN_LEAD_HOURS` | `3` | Never offer a slot in the next 3 hours |
-
-Slots are spread across different days so the owner gets a real choice rather
-than three times on one afternoon.
-
----
-
-## Things worth knowing
-
-**Cost.** Replies inside the 24-hour window after their message are free. This
-whole flow lives inside that window, so it costs nothing. Only a day-before
-reminder sent more than 24 hours later needs a paid utility template.
-
-**Never use an unofficial library.** Baileys, whatsapp-web.js and similar
-violate WhatsApp's Terms and get numbers banned. You would lose the number
-printed on every poster and encoded in every QR.
-
-**PDPA.** You are storing phone numbers, names and shop addresses. Appoint a
-Data Protection Officer and publish the contact details, tell people what you
-collect and why, and delete leads who declined. VIE gives you free legal
-consultant hours under the grant; this is a good use of them.
-
-**Security.** Webhook signatures are verified against `WHATSAPP_APP_SECRET`.
-Do not run in production without it. `.env` must never be committed.
-
----
-
-## Layout
-
-```
-src/
-  config.js     env, feature flags, startup checks
-  server.js     express, webhook verification and signature check
-  whatsapp.js   Cloud API client, message parsing, WhatsApp's character limits
-  flow.js       the state machine. Start here.
-  slots.js      slot generation, timezone handling, localised labels
-  calendar.js   Google free/busy and event creation, degrades gracefully
-  copy.js       every string, in three languages
-  brain.js      OpenRouter intent classification
-  store.js      SQLite: leads, messages, offered slots
-  notify.js     tells you when something happens
-scripts/
-  simulate.js     full conversation, no WhatsApp needed
-  google-auth.js  one-time OAuth
-  leads.js        pipeline table
+```sh
+npm run backup
+# Or choose a destination:
+npm run backup -- ./data/backups/pre-upgrade.db
 ```
 
-State machine: `NEW → AWAITING_SLOT → AWAITING_DETAILS → BOOKED`, with
-`HUMAN` and `DECLINED` as terminal states.
+The backup uses SQLite's online backup API, so committed WAL data is included. Keep backups outside the application host. To restore: stop the service, preserve the current database and WAL/SHM files together as a rollback copy, place the chosen backup at `DB_FILE`, ensure no old WAL/SHM files remain at that path, then restart and verify `/ready` and appointments.
 
----
+Review failed actions in the dashboard, fix the credential/provider problem, and retry. A pending Calendar reservation remains held deliberately: do not manually release it until you have reconciled whether the event exists. Cancelling a visit from the dashboard is an operator action and does not automatically message the customer; use the reply box when appropriate.
 
-## Why building this is not a detour
+## Practical limits
 
-It uses the same provider account, the same webhook, the same message store and
-the same send path that **A03, A04, A05 and A11** need for ReStock itself. If
-this works, your inbound pipe works, with a payload that cannot hurt anyone if
-it breaks. That de-risks the part of the 23 October plan most likely to slip.
+- WhatsApp delivery is **at least once**, not exactly once. If a provider accepts a message but its response and status callback are lost, a retry may duplicate the reply. Delivery callbacks reduce this ambiguity; Calendar event creation has independent idempotency.
+- Manual Calendar edits can race with availability checks. Use a dedicated booking calendar and review external changes; Google event insertion does not provide an atomic availability lock.
+- One shared operator token; no individual accounts, roles, or attribution beyond “operator.” Add identity-aware access before sharing it with a larger team.
+- No audio transcription, media download, supplier ordering, customer reminder templates, payments, or multi-location scheduling. Voice/image messages receive a typed-message prompt.
+- Replies outside the 24-hour customer-service window are blocked and surfaced for review. Proactive/template messaging is not implemented.
+- A reservation is not automatically released because a customer stopped replying or opted out. That could otherwise silently cancel a promised visit.
+- Customer data, message text, queue payloads, and notifications persist in SQLite. There is no automatic deletion policy. Set retention/access rules and implement reviewed deletion procedures appropriate to your operation.
+- Automated tests mock external providers; they do not prove your Meta, Google, or OpenRouter account configuration works.
+
+Provider references: [Google event IDs](https://developers.google.com/workspace/calendar/api/v3/reference/events/insert), [OpenRouter structured outputs](https://openrouter.ai/docs/guides/features/structured-outputs), [Meta webhook reference](https://www.postman.com/meta/whatsapp-business-platform/folder/tduohwq/webhook-payload-reference).

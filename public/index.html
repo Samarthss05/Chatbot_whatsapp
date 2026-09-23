@@ -1,0 +1,175 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <meta name="color-scheme" content="light" />
+    <title>Ledger · Visit desk</title>
+    <link rel="stylesheet" href="/styles.css" />
+    <script type="module" src="/app.js"></script>
+  </head>
+  <body>
+    <section id="login" class="login">
+      <div class="login-card">
+        <div class="brand-mark">L</div>
+        <p class="eyebrow">LEDGER / OPERATIONS</p>
+        <h1>A little more order.<br />A lot more human.</h1>
+        <p class="muted">
+          Your shop visits, conversations, and follow-ups.<br />All in one
+          place.
+        </p>
+        <form id="login-form">
+          <label for="access-token">Operator access token</label
+          ><input
+            id="access-token"
+            type="password"
+            autocomplete="off"
+            required
+            placeholder="Enter your secure access token"
+          /><button class="primary" type="submit">
+            Open visit desk <span>↗</span>
+          </button>
+          <p id="login-error" class="error" role="alert"></p>
+        </form>
+        <small
+          >Your token stays in this tab’s memory. Refreshing signs you
+          out.</small
+        >
+      </div>
+      <div class="login-art">
+        <div class="orb"></div>
+        <div class="art-copy">
+          <p class="eyebrow">LESS ADMIN. MORE CONNECTION.</p>
+          <h2>Make room for<br />the next conversation.</h2>
+          <p>Thoughtfully arranged visits.<br />People at the center.</p>
+        </div>
+      </div>
+    </section>
+    <div id="workspace" class="workspace" hidden>
+      <aside class="sidebar">
+        <a class="brand" href="/"
+          >▧ <strong>ledger</strong><span>VISIT DESK</span></a
+        >
+        <div class="sidebar-label">WORKSPACE</div>
+        <nav aria-label="Main navigation">
+          <button class="nav active" data-view="inbox">
+            ◫ <span>Conversations</span></button
+          ><button class="nav" data-view="appointments">
+            ▦ <span>Appointments</span></button
+          ><button class="nav" data-view="operations">
+            ◎ <span>Activity & recovery</span>
+          </button>
+        </nav>
+        <div class="sidebar-bottom">
+          <div id="connection" class="connection">● Connected</div>
+          <p>Small shops.<br />Real relationships.</p>
+          <button id="logout" class="logout">Sign out ↗</button>
+        </div>
+      </aside>
+      <main>
+        <header class="topbar">
+          <span>Ledger / <b id="page-label">Conversations</b></span>
+          <div>
+            <span id="mode" class="badge">Demo</span
+            ><button id="refresh" class="quiet">↻ Refresh</button
+            ><button id="mobile-logout" class="quiet mobile-only">
+              Sign out
+            </button>
+          </div>
+        </header>
+        <section class="page-head">
+          <div>
+            <p class="eyebrow">YOUR DAY, IN VIEW</p>
+            <h1 id="page-title">Keep the conversation going.</h1>
+            <p id="page-subtitle" class="muted">
+              A clear place for every appointment and every person.
+            </p>
+          </div>
+          <button id="export" class="secondary">↓ Export contacts</button>
+        </section>
+        <div id="notice" class="notice" role="status" hidden></div>
+        <section
+          id="metrics"
+          class="metrics"
+          aria-label="Workspace summary"
+        ></section>
+        <section id="inbox-view" class="view">
+          <div class="inbox-layout">
+            <section class="panel contact-panel">
+              <div class="panel-title">
+                <h2>Conversations</h2>
+                <span id="contact-count" class="muted"></span>
+              </div>
+              <div class="filters">
+                <input
+                  id="search"
+                  aria-label="Search contacts"
+                  placeholder="Search name, shop, or number"
+                /><select id="state-filter" aria-label="Filter conversations">
+                  <option value="">All conversations</option>
+                  <option value="HUMAN">Needs a person</option>
+                  <option value="AWAITING_DETAILS">Needs shop details</option>
+                  <option value="BOOKED">Booked</option>
+                  <option value="BOOKING_PENDING">Confirming</option>
+                  <option value="DECLINED">Opted out</option>
+                </select>
+              </div>
+              <div id="contacts" class="contacts"></div>
+              <div class="pagination">
+                <button id="previous" class="quiet">← Previous</button
+                ><span id="page-number"></span
+                ><button id="next" class="quiet">Next →</button>
+              </div>
+            </section>
+            <section id="conversation" class="panel conversation">
+              <div class="empty">
+                <div class="empty-symbol">↗</div>
+                <h2>Every visit starts with a hello.</h2>
+                <p>
+                  Select a conversation to see its messages,<br />appointment,
+                  and next steps.
+                </p>
+              </div>
+            </section>
+          </div>
+        </section>
+        <section id="appointments-view" class="view" hidden>
+          <div class="panel">
+            <div class="panel-title">
+              <div>
+                <h2>Upcoming visits</h2>
+                <p class="muted" id="timezone"></p>
+              </div>
+              <span class="badge">Next 30 appointments</span>
+            </div>
+            <div id="appointments"></div>
+          </div>
+        </section>
+        <section id="operations-view" class="view" hidden>
+          <div id="integrations" class="integrations"></div>
+          <div class="operations-grid">
+            <section class="panel">
+              <div class="panel-title">
+                <h2>Actions to review</h2>
+                <span class="muted">Automatic retries are enabled</span>
+              </div>
+              <div id="jobs"></div>
+            </section>
+            <section class="panel">
+              <div class="panel-title"><h2>Team notifications</h2></div>
+              <div id="notifications"></div>
+            </section>
+          </div>
+          <section class="panel activity-panel">
+            <div class="panel-title"><h2>Recent activity</h2></div>
+            <div id="activity"></div>
+          </section>
+        </section>
+        <footer>
+          LEDGER VISIT DESK
+          <span>Built around the people behind the shops.</span>
+        </footer>
+      </main>
+    </div>
+  </body>
+</html>
