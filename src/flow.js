@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { cfg, calendarEnabled } from "./config.js";
 import {
   db,
@@ -17,6 +17,9 @@ import {
   audit,
   enqueue,
   completeJob,
+  openBatch,
+  updateBatch,
+  captureSupplierContact,
 } from "./store.js";
 import { pickSlots, label, slotEnd } from "./slots.js";
 import { freeBusy } from "./calendar.js";
@@ -33,6 +36,114 @@ const languageCommand = (text) =>
     malay: "ms",
     "bahasa melayu": "ms",
   })[text.toLowerCase().trim()];
+/** WhatsApp exports arrive as plain text. A .zip means they kept the media. */
+const EXPORTABLE = (doc) =>
+  /^text\/plain/i.test(doc.mimeType || "") ||
+  /\.txt$/i.test(doc.filename || "");
+
+/**
+ * Capture a chat export or a supplier contact card.
+ *
+ * Runs BEFORE the human-takeover check on purpose. During onboarding an
+ * operator has almost always taken the conversation over, and that is exactly
+ * when the owner is sitting there forwarding their supplier threads. Handled
+ * after the check, every one of them would be swallowed into "awaiting a
+ * person" and lost. Capture is not a conversational reply, so the two-turn
+ * handover rule does not apply to it; the acknowledgement still respects it.
+ *
+ * Returns true when the message was an attachment and needs nothing else.
+ */
+function captureAttachment(lead, msg) {
+  const quiet = Boolean(lead.human_takeover);
+  const ack = (key) => {
+    if (!quiet) say(lead.wa_id, t(lead.lang, key));
+  };
+
+  if (msg.contacts?.length) {
+    let saved = 0;
+    for (const card of msg.contacts) {
+      // Their own card, and ours, are not suppliers.
+      if (card.phone === lead.wa_id || card.phone === cfg.owner.whatsapp)
+        continue;
+      if (
+        captureSupplierContact({
+          id: randomUUID(),
+          waId: lead.wa_id,
+          name: card.name,
+          phone: card.phone,
+          messageId: msg.id,
+        })
+      )
+        saved++;
+    }
+    audit("supplier_contact_captured", lead.wa_id, {
+      saved,
+      offered: msg.contacts.length,
+    });
+    if (saved) {
+      notifyOwner(`${saved} supplier contact(s) shared for review.`, {
+        wa_id: lead.wa_id,
+      });
+      ack("contactSaved");
+    }
+    return true;
+  }
+
+  if (!msg.document) return false;
+
+  const id =
+    "imp-" + createHash("sha256").update(msg.id).digest("hex").slice(0, 24);
+
+  if (!EXPORTABLE(msg.document)) {
+    audit("import_rejected", lead.wa_id, {
+      reason: "not_a_text_export",
+      mime: msg.document.mimeType,
+    });
+    ack("importUnreadable");
+    return true;
+  }
+
+  const batch = openBatch({
+    id,
+    waId: lead.wa_id,
+    messageId: msg.id,
+    media: msg.document,
+  });
+  // A replayed webhook finds the batch already open and must not re-enqueue.
+  if (!batch) return true;
+
+  /**
+   * Consent is recorded by an operator at the visit, before the owner sends
+   * anything. An export arriving without it is a file we were not invited to
+   * keep, so we keep the fact of it and not the contents.
+   */
+  if (!lead.import_consent_at) {
+    updateBatch(id, { state: "rejected", reason: "no_consent" });
+    audit("import_rejected", lead.wa_id, { batch: id, reason: "no_consent" });
+    notifyOwner(
+      "A chat export arrived but no import consent is on record. Record consent, then ask them to send it again.",
+      { wa_id: lead.wa_id },
+    );
+    ack("importNoConsent");
+    return true;
+  }
+
+  updateBatch(id, {
+    consent_at: lead.import_consent_at,
+    consent_method: lead.import_consent_method,
+    retention_expires_at: Date.now() + cfg.imports.retentionDays * 24 * 3600000,
+  });
+  enqueue(
+    "import_fetch",
+    "import:" + lead.wa_id,
+    { batchId: id, waId: lead.wa_id },
+    id,
+  );
+  audit("import_received", lead.wa_id, { batch: id });
+  ack("importReceived");
+  return true;
+}
+
 export function handOver(lead, reason, message) {
   updateLead(lead.wa_id, { state: "HUMAN", human_takeover: 1 });
   say(lead.wa_id, message || t(lead.lang, "handover"), { automated: false });
@@ -313,6 +424,8 @@ export async function handleMessage(msg, jobId) {
         audit("opt_out", msg.from);
         return;
       }
+      // Before the takeover check, and never for a contact who opted out.
+      if (lead.state !== "DECLINED" && captureAttachment(lead, msg)) return;
       if (lead.human_takeover) {
         if (
           lead.state === "DECLINED" &&

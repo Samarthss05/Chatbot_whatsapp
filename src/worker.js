@@ -11,10 +11,15 @@ import {
   getOffer,
   logMessage,
   audit,
+  getBatch,
+  updateBatch,
+  purgeExpiredBatches,
 } from "./store.js";
 import { handleMessage, finishBooking, finishCancellation } from "./flow.js";
 import { createEvent, updateEvent, deleteEvent } from "./calendar.js";
-import { deliver } from "./whatsapp.js";
+import { deliver, fetchMediaText } from "./whatsapp.js";
+import { parseExport, looksLikeExport } from "./import.js";
+import { notifyOwner } from "./notify.js";
 import { ServiceError } from "./http.js";
 export async function processJob(job) {
   try {
@@ -120,6 +125,66 @@ export async function processJob(job) {
       completeJob(job.id);
       return;
     }
+    /**
+     * Download a chat export and record what it contains.
+     *
+     * The media id is resolved on every attempt rather than carried in the
+     * payload, because the download URL behind it expires in minutes while the
+     * id itself lives for about a month. A retry tomorrow still works.
+     */
+    if (job.kind === "import_fetch") {
+      const batch = getBatch(p.batchId);
+      if (!batch) throw new ServiceError("Import no longer exists", null, true);
+      if (batch.state !== "pending") {
+        completeJob(job.id);
+        return;
+      }
+      if (cfg.dryRun) {
+        atomic(() => {
+          updateBatch(batch.id, { state: "failed", reason: "demo_mode" });
+          completeJob(job.id);
+        });
+        return;
+      }
+      const file = await fetchMediaText(batch.media_id, {
+        maxBytes: cfg.imports.maxBytes,
+      });
+      if (!looksLikeExport(file.text)) {
+        atomic(() => {
+          updateBatch(batch.id, {
+            state: "rejected",
+            reason: "not_a_chat_export",
+          });
+          audit("import_rejected", batch.id, { reason: "not_a_chat_export" });
+          notifyOwner(
+            "A forwarded file did not look like a chat export, so nothing was kept.",
+            { wa_id: batch.wa_id },
+          );
+          completeJob(job.id);
+        });
+        return;
+      }
+      const { meta } = parseExport(file.text);
+      atomic(() => {
+        updateBatch(batch.id, {
+          raw: file.text,
+          sha256: file.sha256,
+          bytes: file.bytes,
+          state: "stored",
+          summary: JSON.stringify(meta),
+        });
+        audit("import_stored", batch.id, {
+          messages: meta.messageCount,
+          days: meta.distinctDays,
+        });
+        notifyOwner(
+          `Chat export ready to review: ${meta.messageCount} messages across ${meta.distinctDays} days.`,
+          { wa_id: batch.wa_id },
+        );
+        completeJob(job.id);
+      });
+      return;
+    }
     if (job.kind === "notify") {
       if (!cfg.dryRun && cfg.notifyWebhook) {
         let res;
@@ -214,6 +279,22 @@ export function startWorker() {
     }
   }, 10000);
   heartbeat.unref();
+  /**
+   * Retention runs here rather than in the HTTP process because the worker
+   * holds the lease, so exactly one instance purges. A promise made to a shop
+   * owner about how long we keep their chat should not depend on anyone
+   * remembering to run something.
+   */
+  const sweep = () => {
+    try {
+      purgeExpiredBatches();
+    } catch {
+      console.error(JSON.stringify({ event: "retention_sweep_failed" }));
+    }
+  };
+  sweep();
+  const retention = setInterval(sweep, 3600000);
+  retention.unref();
   const tick = async () => {
     if (stopping || active) return;
     lastTick = Date.now();
@@ -238,6 +319,7 @@ export function startWorker() {
       stopping = true;
       clearInterval(timer);
       clearInterval(heartbeat);
+      clearInterval(retention);
       await active;
       db.prepare("DELETE FROM worker_lock WHERE owner=?").run(owner);
     },

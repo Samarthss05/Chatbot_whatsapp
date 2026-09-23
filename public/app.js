@@ -189,6 +189,7 @@ async function loadConversation(id) {
   );
   $("#conversation").innerHTML =
     `<div class="conversation-header"><div><h2>${esc(l.shop_name || l.name || "New contact")}</h2><p class="muted">+${esc(l.wa_id)} · ${esc(l.lang.toUpperCase())} ${badge(l.state)}</p></div><div class="actions"><button class="quiet" data-action="${l.human_takeover ? "resume" : "takeover"}" ${l.state === "DECLINED" ? "disabled" : ""}>${l.human_takeover ? "Resume assistant" : "Take over"}</button></div></div>${active ? `<div class="booking-strip"><span>▦ ${esc(date(active.start))} · ${esc(labels[active.status])}</span>${active.status === "confirmed" ? `<button class="quiet danger" data-cancel="${esc(active.id)}">Cancel visit</button>` : ""}</div>` : ""}<div class="messages">${data.messages.map((m) => `<div class="bubble ${m.direction === "out" ? "out" : ""}">${esc(m.body)}<small>${m.direction === "in" ? "Contact" : "Ledger"} · ${esc(date(m.at))}${m.delivery ? " · " + esc(m.delivery.status) : ""}</small></div>`).join("") || '<p class="empty-list">Messages will appear here.</p>'}</div><form id="reply-form" class="composer"><label for="reply-text">Your reply</label><textarea id="reply-text" maxlength="4096" placeholder="Write a personal reply…" ${!data.canReply || l.state === "DECLINED" ? "disabled" : ""} required>${esc(drafts.get(id) || "")}</textarea><div class="composer-bottom"><small>${!data.canReply ? "Reply window closed. Wait for a new message." : l.state === "DECLINED" ? "This contact has opted out." : "Sending a reply pauses the assistant for this conversation."}</small><button class="primary" ${!data.canReply || l.state === "DECLINED" ? "disabled" : ""}>Send reply ↗</button></div></form><details class="notes"><summary>Private team notes ${l.notes ? "· saved" : ""}</summary><textarea id="notes-text" maxlength="4000" aria-label="Private notes">${esc(noteDrafts.get(id) ?? l.notes ?? "")}</textarea><button class="quiet" data-action="notes">Save notes</button></details>`;
+  $("#conversation").insertAdjacentHTML("beforeend", renderOnboarding(data));
   const area = $(".messages");
   area.scrollTop = area.scrollHeight;
   $("#reply-text").oninput = (e) => drafts.set(id, e.target.value);
@@ -197,6 +198,104 @@ async function loadConversation(id) {
     e.preventDefault();
     await action("reply", { text: $("#reply-text").value });
   };
+}
+const importReasons = {
+  no_consent: "No consent was on record when it arrived",
+  not_a_chat_export: "The file did not read as a chat export",
+  demo_mode: "Demo mode never contacts external services",
+  operator: "Rejected during review",
+  retention: "Retention period ended",
+};
+/**
+ * Imports get their own labels rather than borrowing the booking ones: a
+ * stored export is "ready to review", not "confirming", and an operator
+ * reading the wrong word acts on the wrong thing.
+ */
+const importLabels = {
+  pending: "Downloading",
+  stored: "Ready to review",
+  accepted: "Accepted",
+  rejected: "Not kept",
+  purged: "Text deleted",
+  failed: "Could not read",
+};
+const importBadge = (state) => {
+  const tone =
+    state === "stored"
+      ? "warning"
+      : state === "accepted"
+        ? "good"
+        : state === "failed"
+          ? "bad"
+          : "";
+  return `<span class="badge ${tone}">${esc(importLabels[state] || state)}</span>`;
+};
+/**
+ * Everything gathered at the visit, in one place: whether we may keep an export
+ * at all, which outlet this shop is in the order pipeline, the supplier numbers
+ * they shared, and the exports themselves.
+ */
+function renderOnboarding(data) {
+  const l = data.lead;
+  const imports = data.imports || [];
+  const contacts = data.supplierContacts || [];
+  const consented = Boolean(l.import_consent_at);
+  const waiting = contacts.filter((c) => c.state === "captured").length;
+  const consentCard = `<div class="onboarding-card"><h3>Import consent</h3><p class="${consented ? "" : "muted"}">${
+    consented
+      ? `Recorded ${esc(date(l.import_consent_at))}${l.import_consent_method ? " · " + esc(l.import_consent_method) : ""}`
+      : "Not recorded. An export sent now is logged and discarded."
+  }</p><button class="quiet${consented ? " danger" : ""}" data-consent="${consented ? "withdraw" : "grant"}">${consented ? "Withdraw consent" : "Record consent"}</button></div>`;
+  const outletCard = `<div class="onboarding-card"><h3>Outlet link</h3><p class="muted">Joins this conversation to the order pipeline.</p><div class="inline-row"><input id="outlet-id" maxlength="64" placeholder="outlet id" value="${esc(l.outlet_id || "")}"><button class="quiet" data-outlet="1">Save</button></div></div>`;
+  const contactList = contacts.length
+    ? `<ul class="plain-list">${contacts
+        .map(
+          (c) =>
+            `<li><span><strong>${esc(c.name || "Unnamed")}</strong> · +${esc(c.phone)}</span>${
+              c.state === "captured"
+                ? `<span class="actions"><button class="quiet" data-contact-act="accept" data-contact-id="${esc(c.id)}">Keep</button><button class="quiet danger" data-contact-act="reject" data-contact-id="${esc(c.id)}">Discard</button></span>`
+                : badge(c.state === "accepted" ? "confirmed" : "cancelled")
+            }</li>`,
+        )
+        .join("")}</ul>`
+    : '<p class="empty-list">No supplier contacts shared yet.</p>';
+  const importList = imports.length
+    ? `<ul class="plain-list">${imports
+        .map((b) => {
+          const s = b.summary ? JSON.parse(b.summary) : null;
+          return `<li><span><strong>${esc(b.supplier_label || b.filename || "Chat export")}</strong><br><small class="muted">${esc(date(b.created_at))}${s ? ` · ${s.messageCount} messages over ${s.distinctDays} days` : ""}${b.reason ? ` · ${esc(importReasons[b.reason] || b.reason)}` : ""}</small></span><span class="actions">${importBadge(b.state)}${b.has_raw ? `<button class="quiet" data-import="${esc(b.id)}">Open</button>` : ""}</span></li>`;
+        })
+        .join("")}</ul>`
+    : '<p class="empty-list">No chat exports received yet.</p>';
+  return `<details class="onboarding"${imports.length || contacts.length ? " open" : ""}><summary>Onboarding data${waiting ? ` · ${waiting} to review` : ""}</summary><div class="onboarding-grid">${consentCard}${outletCard}</div><h3>Supplier contacts</h3>${contactList}<h3>Chat exports</h3>${importList}<div id="import-detail"></div></details>`;
+}
+/**
+ * One export, opened.
+ *
+ * The ranked phrase list is the point: it is the shop's own vocabulary, which
+ * is what seeds their alias table. Which author is the shop is a judgement the
+ * operator makes here, because the file cannot tell us on its own.
+ */
+async function openImport(id) {
+  const data = await api("/imports/" + encodeURIComponent(id));
+  const s = data.summary;
+  const columns = (s?.authors ?? [])
+    .map((a) => {
+      const phrases = data.phrases?.[a.name] ?? [];
+      return `<div class="phrase-column"><h4>${esc(a.name)} <small class="muted">${a.count} messages</small></h4>${
+        phrases.length
+          ? `<ol class="phrase-list">${phrases.map((p) => `<li><span>${esc(p.phrase)}</span><b>${p.count}</b></li>`).join("")}</ol>`
+          : '<p class="empty-list">Nothing repeated.</p>'
+      }</div>`;
+    })
+    .join("");
+  const warning = s?.dateOrderAmbiguous
+    ? '<p class="warn-line">Dates here could be day-first or month-first. Check one against the conversation before trusting any timing.</p>'
+    : "";
+  const act = (name, label, cls = "quiet") =>
+    `<button class="${cls}" data-import-act="${name}" data-import-id="${esc(data.batch.id)}">${label}</button>`;
+  $("#import-detail").innerHTML =
+    `<div class="import-detail"><div class="import-detail-head"><div><h3>${esc(data.batch.supplier_label || data.batch.filename || "Chat export")}</h3><p class="muted">${s ? `${s.messageCount} messages · ${s.distinctDays} days · ${esc(s.firstMessageAt || "")} to ${esc(s.lastMessageAt || "")}` : "No summary"}</p></div><div class="actions">${act("accept", "Accept")}${act("reject", "Reject")}${act("purge", "Delete text now", "quiet danger")}</div></div>${warning}<div class="inline-row"><input id="supplier-label" maxlength="120" placeholder="Which supplier is this thread?" value="${esc(data.batch.supplier_label || "")}">${act("label", "Save name")}</div><div class="phrase-columns">${columns}</div><p class="muted small">Text is deleted ${esc(date(data.batch.retention_expires_at))}. The counts above are kept.</p></div>`;
 }
 async function action(name, body = {}) {
   try {
@@ -330,6 +429,44 @@ document.addEventListener("click", async (e) => {
     if (b.dataset.read) {
       await api("/notifications/" + b.dataset.read + "/read", {});
       await refresh();
+    }
+    if (b.dataset.consent) {
+      const grant = b.dataset.consent === "grant";
+      if (
+        !grant ||
+        confirm(
+          "Confirm you have told this shop what you will keep from their chats, why, and for how long.",
+        )
+      ) {
+        await action("consent", { granted: grant, method: "in_person" });
+        await loadConversation(selected);
+      }
+    }
+    if (b.dataset.outlet) {
+      await action("outlet", { outletId: $("#outlet-id").value.trim() });
+      await loadConversation(selected);
+    }
+    if (b.dataset.contactAct) {
+      await api(`/contacts/${b.dataset.contactId}/${b.dataset.contactAct}`, {});
+      await loadConversation(selected);
+    }
+    if (b.dataset.import) await openImport(b.dataset.import);
+    if (b.dataset.importAct) {
+      const name = b.dataset.importAct;
+      if (
+        name !== "purge" ||
+        confirm(
+          "Delete the exported text now? The counts are kept. This cannot be undone.",
+        )
+      ) {
+        await api(`/imports/${b.dataset.importId}/${name}`, {
+          supplierLabel: $("#supplier-label")?.value ?? "",
+        });
+        notice(
+          name === "purge" ? "The exported text has been deleted." : "Saved.",
+        );
+        await loadConversation(selected);
+      }
     }
   } catch (e) {
     notice(e.message, true);

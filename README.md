@@ -35,6 +35,51 @@ The demo binds only to your computer, uses synthetic contacts in `data/demo.db`,
 - Strict webhook signatures, business-phone filtering, header-only admin authentication, security headers, request limits, and login throttling.
 - Safe simulation, schema migration, online SQLite backups, tests, Docker configuration, and CI.
 
+---
+
+## Onboarding data: chat exports and supplier contacts
+
+The slowest part of onboarding is writing down what a shop orders and who they
+order it from. Both are already on the owner's phone.
+
+**Chat export.** In the shop, open their thread with one supplier, use
+**Export chat → Without media**, and share it to the Ledger number. Say
+"without media" out loud or a year of delivery photos arrives instead of a
+text file. The export is months of their own phrasing, quantities and timing,
+which is what seeds their item list before the first order rather than after
+twenty of them.
+
+**Contact cards.** Forwarding a supplier's contact card captures the name and
+number with no typing. Their own card and yours are ignored.
+
+Both are captured even while a person has taken the conversation over, because
+that is exactly when they happen.
+
+### Consent comes first, and is recorded by a person
+
+An export contains the supplier's messages too, so it is not ours to keep on a
+whim. Record consent in the dashboard **before** the owner sends anything:
+open the conversation, **Onboarding data → Record consent**. Say what you are
+taking, why, how long you keep it, and that their supplier's prices never leave
+their outlet.
+
+An export that arrives with no consent on record is logged and discarded, and
+you get a notification. That is the intended behaviour, not a bug: record
+consent and ask them to send it again.
+
+### What is kept, and for how long
+
+`IMPORT_RETENTION_DAYS` (default 30) starts at capture. When it expires the
+verbatim text is deleted and the derived counts remain. **Delete text now** in
+the review panel does the same immediately. Withdrawing consent stops future
+imports; it deliberately does not delete what is already stored, because that
+should be a separate, considered decision.
+
+Nothing from an export is written into prices or aliases automatically. The
+review panel ranks the repeated phrases per author, you decide which author is
+the shop, and the alias work happens in the order pipeline with a human
+confirming. `leads.outlet_id` is the join between the two.
+
 ## Live setup
 
 1. `cp .env.example .env` and fill in the WhatsApp Cloud API credentials.
@@ -141,6 +186,11 @@ Every `/api/*` route requires `x-admin-token: <ADMIN_TOKEN>`. Do not put the tok
 - `GET/POST /webhook` — Meta verification and delivery.
 - `GET /api/overview`, `/api/leads`, `/api/leads/:id` — dashboard data.
 - `POST /api/leads/:id/takeover`, `/resume`, `/reply`, `/notes` — operator actions.
+- `POST /api/leads/:id/consent` — record or withdraw import consent.
+- `POST /api/leads/:id/outlet` — link the conversation to an outlet in the order pipeline.
+- `GET /api/imports/:id` — one chat export, with ranked phrases per author.
+- `POST /api/imports/:id/accept`, `/reject`, `/label`, `/purge` — review an export.
+- `POST /api/contacts/:id/accept`, `/reject` — review a captured supplier contact.
 - `POST /api/bookings/:id/cancel` — request calendar-aware cancellation.
 - `GET /api/jobs`; `POST /api/jobs/:id/retry` — review and retry failed actions.
 - `GET /api/activity`, `/api/export` — activity and contacts export.

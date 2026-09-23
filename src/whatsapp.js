@@ -1,6 +1,6 @@
 import crypto from "node:crypto";
 import { cfg } from "./config.js";
-import { request } from "./http.js";
+import { request, ServiceError } from "./http.js";
 export function verifySignature(rawBody, header) {
   if (
     !cfg.wa.appSecret ||
@@ -91,6 +91,45 @@ export async function deliver(payload, jobId, attempt) {
     "WhatsApp",
   );
 }
+/** A media id is opaque to us; validate its shape, never trust its length. */
+const mediaId = (v) =>
+  typeof v === "string" && /^[A-Za-z0-9_=-]{1,256}$/.test(v) ? v : null;
+
+export function parseDocument(doc) {
+  const id = mediaId(doc?.id);
+  if (!id) return null;
+  return {
+    id,
+    filename: cut(doc.filename, 200) || null,
+    mimeType: cut(doc.mime_type, 100) || null,
+    sha256: cut(doc.sha256, 128) || null,
+  };
+}
+
+/**
+ * Contact cards, as WhatsApp already structures them. Numbers are reduced to
+ * digits so they compare against `leads.wa_id` without a second normaliser.
+ */
+export function parseContacts(list) {
+  if (!Array.isArray(list) || !list.length) return null;
+  const out = [];
+  for (const c of list.slice(0, 20)) {
+    const name =
+      cut(c?.name?.formatted_name, 120) ||
+      cut(
+        [c?.name?.first_name, c?.name?.last_name].filter(Boolean).join(" "),
+        120,
+      ) ||
+      null;
+    for (const p of Array.isArray(c?.phones) ? c.phones.slice(0, 5) : []) {
+      const digits = String(p?.wa_id || p?.phone || "").replace(/\D/g, "");
+      if (digits.length >= 7 && digits.length <= 20)
+        out.push({ name, phone: digits });
+    }
+  }
+  return out.length ? out : null;
+}
+
 export function parseWebhook(body) {
   const messages = [],
     statuses = [];
@@ -128,6 +167,11 @@ export function parseWebhook(body) {
             typeof rawReply === "string" && rawReply.length <= 256
               ? rawReply
               : null,
+          // A chat export arrives as a document, and a supplier's number as a
+          // contact card. Both used to be discarded here, which made them
+          // unrecoverable by the time anything downstream could ask.
+          document: parseDocument(m.document),
+          contacts: parseContacts(m.contacts),
         });
       }
       for (const s of Array.isArray(v.statuses) ? v.statuses : [])
@@ -152,3 +196,63 @@ export function parseWebhook(body) {
   return { messages, statuses };
 }
 export const parseInbound = (body) => parseWebhook(body).messages;
+
+/**
+ * Download one media object as text.
+ *
+ * Two steps, deliberately in one call: the lookup returns a download URL that
+ * is valid for only a few minutes, so caching it in a job payload and using it
+ * on a later retry would fail in a way that looks like a network fault. The
+ * media id itself stays valid for about a month, so a retry re-resolves it.
+ *
+ * The size limit is enforced twice, once on the declared size and once while
+ * reading, because the declared size is supplied by the other end.
+ */
+export async function fetchMediaText(id, { maxBytes = 5 * 1024 * 1024 } = {}) {
+  const meta = await request(
+    `https://graph.facebook.com/${cfg.wa.graphVersion}/${id}`,
+    { headers: { Authorization: `Bearer ${cfg.wa.token}` } },
+    "WhatsApp media lookup",
+  );
+  if (!meta?.url) throw new ServiceError("WhatsApp media lookup", null, true);
+  if (Number(meta.file_size) > maxBytes)
+    throw new ServiceError("Attachment is too large to import", null, true);
+
+  let res;
+  try {
+    res = await fetch(meta.url, {
+      headers: { Authorization: `Bearer ${cfg.wa.token}` },
+      signal: AbortSignal.timeout(30000),
+    });
+  } catch {
+    throw new ServiceError("WhatsApp media download");
+  }
+  if (!res.ok)
+    /**
+     * Only an authorisation failure is permanent here. A 404 or 410 means the
+     * short-lived download URL died, not that the export is gone: the media id
+     * behind it lives for about a month, and every attempt re-resolves it. The
+     * default client-error rule would give up on a file we could still fetch.
+     */
+    throw new ServiceError(
+      "WhatsApp media download",
+      res.status,
+      [401, 403].includes(res.status),
+    );
+
+  const chunks = [];
+  let total = 0;
+  for await (const chunk of res.body) {
+    total += chunk.length;
+    if (total > maxBytes)
+      throw new ServiceError("Attachment is too large to import", null, true);
+    chunks.push(chunk);
+  }
+  const buffer = Buffer.concat(chunks);
+  return {
+    text: buffer.toString("utf8"),
+    bytes: buffer.length,
+    sha256: crypto.createHash("sha256").update(buffer).digest("hex"),
+    mimeType: meta.mime_type || null,
+  };
+}
