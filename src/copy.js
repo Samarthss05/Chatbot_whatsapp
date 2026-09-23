@@ -179,4 +179,41 @@ const extras = {
     chooseHuman: "Bercakap dengan orang",
   },
 };
+/**
+ * Capture acknowledgements.
+ *
+ * Short on purpose. The owner has just done us a favour in the middle of their
+ * working day and does not need a paragraph about it. When an operator has
+ * already taken the conversation over, none of these are sent at all.
+ */
+const captureCopy = {
+  en: {
+    importReceived:
+      "Got the chat, thank you. I’ll set up your usual items from it before the visit.",
+    importNoConsent: `Thanks for sending that. Before I can keep it I need your go-ahead in person, so ${NAME} will confirm with you first.`,
+    importUnreadable:
+      "Thanks, but I couldn’t read that file. Please use Export chat, choose Without media, and send it again.",
+    contactSaved:
+      "Saved, thank you. Send the next supplier’s contact whenever you like.",
+  },
+  zh: {
+    importReceived: "收到聊天记录，谢谢。上门前我会先整理好你常订的货品。",
+    importNoConsent: `谢谢你发过来。保存之前需要你当面同意，${NAME} 会先和你确认。`,
+    importUnreadable:
+      "谢谢，不过这个文件读不了。请用「汇出聊天」，选择「不含媒体」，再发一次。",
+    contactSaved: "已保存，谢谢。可以继续发下一个供应商的联系人。",
+  },
+  ms: {
+    importReceived:
+      "Terima kasih, sudah diterima. Saya akan susun barang biasa anda sebelum lawatan.",
+    importNoConsent: `Terima kasih. Sebelum saya boleh simpan, ${NAME} perlu dapatkan kebenaran anda secara bersemuka dahulu.`,
+    importUnreadable:
+      "Terima kasih, tetapi fail itu tidak dapat dibaca. Sila guna Eksport sembang, pilih Tanpa media, dan hantar semula.",
+    contactSaved:
+      "Sudah disimpan, terima kasih. Hantar kenalan pembekal seterusnya bila-bila masa.",
+  },
+};
+
 for (const lang of Object.keys(extras)) Object.assign(S[lang], extras[lang]);
+for (const lang of Object.keys(captureCopy))
+  Object.assign(S[lang], captureCopy[lang]);

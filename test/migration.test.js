@@ -23,7 +23,7 @@ after(() => {
   rmSync(dir, { recursive: true, force: true });
 });
 test("legacy data migrates without losing reservations, history, or takeover", () => {
-  assert.equal(db.pragma("user_version", { simple: true }), 2);
+  assert.equal(db.pragma("user_version", { simple: true }), 3);
   assert.equal(getLead("6593330001").human_takeover, 1);
   assert.equal(activeBookings().length, 1);
   assert.equal(activeBookings()[0].calendar_id, "legacy-event");
@@ -33,6 +33,20 @@ test("legacy data migrates without losing reservations, history, or takeover", (
   );
   migrate();
   assert.equal(activeBookings().length, 1);
+});
+test("import columns and tables arrive empty on an upgraded database", () => {
+  const lead = getLead("6593330001");
+  // Present, and null: an upgrade never implies a consent nobody gave.
+  assert.equal(lead.outlet_id, null);
+  assert.equal(lead.import_consent_at, null);
+  for (const table of ["import_batch", "supplier_contact"])
+    assert.equal(
+      db.prepare(`SELECT count(*) n FROM ${table}`).get().n,
+      0,
+      `${table} should exist and be empty`,
+    );
+  migrate(); // idempotent
+  assert.equal(db.pragma("user_version", { simple: true }), 3);
 });
 test("legacy webhook IDs remain deduplicated after upgrade", () => {
   ingest([

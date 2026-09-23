@@ -11,7 +11,7 @@ db.pragma("foreign_keys = ON");
 db.pragma("busy_timeout = 5000");
 const ACTIVE = "'pending','confirmed','cancel_pending'";
 export function migrate() {
-  if (db.pragma("user_version", { simple: true }) > 2)
+  if (db.pragma("user_version", { simple: true }) > 3)
     throw new Error("Database schema is newer than this application");
   db.transaction(() => {
     db.exec(`
@@ -27,6 +27,11 @@ export function migrate() {
       CREATE TABLE IF NOT EXISTS notifications (id TEXT PRIMARY KEY, body TEXT NOT NULL, wa_id TEXT, created_at INTEGER NOT NULL, read_at INTEGER);
       CREATE TABLE IF NOT EXISTS worker_lock (id INTEGER PRIMARY KEY CHECK(id=1), owner TEXT NOT NULL, expires_at INTEGER NOT NULL);
       CREATE TABLE IF NOT EXISTS delivery_events (message_id TEXT NOT NULL, status TEXT NOT NULL, timestamp INTEGER NOT NULL, error_code TEXT, PRIMARY KEY(message_id,status,timestamp));
+      CREATE TABLE IF NOT EXISTS import_batch (id TEXT PRIMARY KEY, wa_id TEXT NOT NULL REFERENCES leads(wa_id), message_id TEXT, media_id TEXT, filename TEXT, mime_type TEXT, bytes INTEGER, sha256 TEXT, raw TEXT, state TEXT NOT NULL CHECK(state IN ('pending','stored','rejected','accepted','purged','failed')), reason TEXT, supplier_label TEXT, summary TEXT, consent_at INTEGER, consent_method TEXT, retention_expires_at INTEGER, purged_at INTEGER, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL);
+      CREATE INDEX IF NOT EXISTS import_batch_contact ON import_batch(wa_id,created_at);
+      CREATE INDEX IF NOT EXISTS import_batch_retention ON import_batch(state,retention_expires_at);
+      CREATE TABLE IF NOT EXISTS supplier_contact (id TEXT PRIMARY KEY, wa_id TEXT NOT NULL REFERENCES leads(wa_id), name TEXT, phone TEXT NOT NULL, state TEXT NOT NULL CHECK(state IN ('captured','accepted','rejected')), message_id TEXT, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL);
+      CREATE UNIQUE INDEX IF NOT EXISTS supplier_contact_unique ON supplier_contact(wa_id,phone);
     `);
     const add = (table, column, type) => {
       if (
@@ -41,6 +46,15 @@ export function migrate() {
     add("leads", "details_attempts", "INTEGER DEFAULT 0");
     add("messages", "external_id", "TEXT");
     add("messages", "type", "TEXT DEFAULT 'text'");
+    // The bridge to the order pipeline. One nullable column is the whole join:
+    // conversations and appointments stay here, outlets and aliases stay there,
+    // and "did this outlet order a second time" stays answerable.
+    add("leads", "outlet_id", "TEXT");
+    // Import consent is recorded per contact by an operator at the visit, before
+    // any export is kept. It is a narrower purpose than the booking consent, so
+    // it is tracked separately rather than folded into the lead's state.
+    add("leads", "import_consent_at", "INTEGER");
+    add("leads", "import_consent_method", "TEXT");
     db.exec(
       "CREATE INDEX IF NOT EXISTS messages_contact ON messages(wa_id,at); CREATE INDEX IF NOT EXISTS messages_external ON messages(external_id);",
     );
@@ -67,6 +81,8 @@ export function migrate() {
       }
       db.pragma("user_version = 2");
     }
+    if (db.pragma("user_version", { simple: true }) < 3)
+      db.pragma("user_version = 3");
   }).immediate();
 }
 migrate();
@@ -94,6 +110,9 @@ const leadKeys = new Set([
   "notes",
   "last_inbound_at",
   "details_attempts",
+  "outlet_id",
+  "import_consent_at",
+  "import_consent_method",
 ]);
 export function updateLead(id, patch) {
   const keys = Object.keys(patch);
@@ -319,4 +338,117 @@ export function retryJob(id) {
       "UPDATE jobs SET status='queued',payload=json_set(payload,'$._retryBase',attempts),available_at=?,updated_at=?,last_error=NULL,external_id=CASE WHEN kind='wa' THEN NULL ELSE external_id END WHERE id=? AND status='dead'",
     )
     .run(Date.now(), Date.now(), id).changes;
+}
+
+/* ------------------------------------------------------------------ imports
+ * Chat exports a shop owner forwards to us, and supplier contact cards.
+ *
+ * Nothing here keeps a document we were not invited to keep: a batch only
+ * reaches 'stored' when the contact has an import consent record, and the
+ * verbatim text is dropped at 'purged' while the derived counts survive.
+ */
+
+export const getBatch = (id) =>
+  db.prepare("SELECT * FROM import_batch WHERE id=?").get(id);
+
+export const batchesFor = (waId) =>
+  db
+    .prepare(
+      "SELECT id,wa_id,filename,mime_type,bytes,state,reason,supplier_label,summary,consent_at,retention_expires_at,purged_at,created_at,updated_at,raw IS NOT NULL AS has_raw FROM import_batch WHERE wa_id=? ORDER BY created_at DESC",
+    )
+    .all(waId);
+
+export function openBatch({ id, waId, messageId, media }) {
+  const now = Date.now();
+  const changes = db
+    .prepare(
+      "INSERT OR IGNORE INTO import_batch(id,wa_id,message_id,media_id,filename,mime_type,bytes,state,created_at,updated_at) VALUES (?,?,?,?,?,?,?, 'pending',?,?)",
+    )
+    .run(
+      id,
+      waId,
+      messageId,
+      media.id || null,
+      media.filename || null,
+      media.mimeType || null,
+      media.bytes || null,
+      now,
+      now,
+    ).changes;
+  return changes ? getBatch(id) : null;
+}
+
+export function updateBatch(id, patch) {
+  const keys = Object.keys(patch);
+  if (!keys.length) return getBatch(id);
+  const allowed = new Set([
+    "raw",
+    "state",
+    "reason",
+    "supplier_label",
+    "summary",
+    "sha256",
+    "bytes",
+    "consent_at",
+    "consent_method",
+    "retention_expires_at",
+    "purged_at",
+  ]);
+  if (keys.some((k) => !allowed.has(k))) throw new Error("Invalid batch field");
+  db.prepare(
+    `UPDATE import_batch SET ${keys.map((k) => `${k}=@${k}`).join(",")}, updated_at=@updated_at WHERE id=@id`,
+  ).run({ ...patch, id, updated_at: Date.now() });
+  return getBatch(id);
+}
+
+/**
+ * Drop the verbatim export, keep the derived summary.
+ *
+ * This is the retention promise made to the shop owner at the visit, so it
+ * runs on a clock rather than on someone remembering.
+ */
+export function purgeBatch(id) {
+  return db
+    .prepare(
+      "UPDATE import_batch SET raw=NULL,state='purged',purged_at=?,updated_at=? WHERE id=? AND raw IS NOT NULL",
+    )
+    .run(Date.now(), Date.now(), id).changes;
+}
+
+export function purgeExpiredBatches(now = Date.now()) {
+  const due = db
+    .prepare(
+      "SELECT id FROM import_batch WHERE raw IS NOT NULL AND retention_expires_at IS NOT NULL AND retention_expires_at<=?",
+    )
+    .all(now);
+  for (const row of due) {
+    purgeBatch(row.id);
+    audit("import_purged", row.id, { reason: "retention" });
+  }
+  return due.length;
+}
+
+export function captureSupplierContact({ id, waId, name, phone, messageId }) {
+  const now = Date.now();
+  const inserted = db
+    .prepare(
+      "INSERT OR IGNORE INTO supplier_contact(id,wa_id,name,phone,state,message_id,created_at,updated_at) VALUES (?,?,?,?, 'captured',?,?,?)",
+    )
+    .run(id, waId, name || null, phone, messageId || null, now, now).changes;
+  return Boolean(inserted);
+}
+
+export const supplierContactsFor = (waId) =>
+  db
+    .prepare(
+      "SELECT * FROM supplier_contact WHERE wa_id=? ORDER BY created_at DESC",
+    )
+    .all(waId);
+
+export function setSupplierContactState(id, state) {
+  return db
+    .prepare(
+      "UPDATE supplier_contact SET state=?,updated_at=? WHERE id=? AND state='captured'",
+    )
+    .run(state, Date.now(), id).changes;
 }

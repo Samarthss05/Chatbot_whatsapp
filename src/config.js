@@ -45,6 +45,12 @@ export const cfg = {
   },
   jobAttempts: number("JOB_MAX_ATTEMPTS", 5),
   pollMs: number("WORKER_POLL_MS", 500),
+  imports: {
+    /** A text export of a year of one supplier thread is well under a megabyte. */
+    maxBytes: number("IMPORT_MAX_BYTES", 5 * 1024 * 1024),
+    /** How long the verbatim export is kept before only its counts remain. */
+    retentionDays: number("IMPORT_RETENTION_DAYS", 30),
+  },
 };
 export const calendarEnabled =
   !cfg.dryRun &&
@@ -63,6 +69,8 @@ export function validateConfig(c = cfg) {
     ["OFFER_TTL_MINUTES", c.booking.offerMinutes, 1, 1440],
     ["JOB_MAX_ATTEMPTS", c.jobAttempts, 1, 20],
     ["WORKER_POLL_MS", c.pollMs, 100, 10000],
+    ["IMPORT_MAX_BYTES", c.imports.maxBytes, 1024, 25 * 1024 * 1024],
+    ["IMPORT_RETENTION_DAYS", c.imports.retentionDays, 1, 365],
   ]) {
     if (!Number.isInteger(value) || value < min || value > max)
       errors.push(`${key} must be an integer from ${min} to ${max}`);

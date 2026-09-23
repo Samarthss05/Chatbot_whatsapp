@@ -14,9 +14,16 @@ import {
   history,
   audit,
   retryJob,
+  getBatch,
+  batchesFor,
+  updateBatch,
+  purgeBatch,
+  supplierContactsFor,
+  setSupplierContactState,
 } from "./store.js";
 import { cancelBooking } from "./flow.js";
 import { say } from "./messaging.js";
+import { parseExport, phraseFrequency, activityProfile } from "./import.js";
 const safeEqual = (a, b) => {
   if (typeof a !== "string" || !b) return false;
   const x = crypto.createHash("sha256").update(a).digest(),
@@ -168,14 +175,60 @@ export function createApp({ workerStatus = () => ({ running: true }) } = {}) {
         )
         .all(lead.wa_id),
       canReply: cfg.dryRun || Date.now() - lead.last_inbound_at < 24 * 3600000,
+      imports: batchesFor(lead.wa_id),
+      supplierContacts: supplierContactsFor(lead.wa_id),
     });
   });
   app.post("/api/leads/:id/:action", (req, res) => {
     const lead = getLead(req.params.id);
     if (!lead) return res.status(404).json({ error: "Conversation not found" });
     const action = req.params.action;
-    if (!["takeover", "resume", "notes", "reply"].includes(action))
+    if (
+      !["takeover", "resume", "notes", "reply", "consent", "outlet"].includes(
+        action,
+      )
+    )
       return res.status(404).json({ error: "Unknown action" });
+    /**
+     * Import consent is recorded by the person who asked for it, face to face.
+     * It is deliberately not something the contact can grant by sending a file,
+     * and revoking it never reaches back to delete what is already stored —
+     * that is what the purge action is for, and it should be a separate decision.
+     */
+    if (action === "consent") {
+      const granted = req.body?.granted !== false;
+      const method = String(req.body?.method || "in_person").slice(0, 60);
+      atomic(() => {
+        updateLead(lead.wa_id, {
+          import_consent_at: granted ? Date.now() : null,
+          import_consent_method: granted ? method : null,
+        });
+        audit(
+          granted ? "import_consent_recorded" : "import_consent_withdrawn",
+          lead.wa_id,
+          { method },
+          "operator",
+        );
+      });
+      return res.json({ ok: true });
+    }
+    if (action === "outlet") {
+      const id = String(req.body?.outletId || "").trim();
+      if (id && !/^[A-Za-z0-9_-]{1,64}$/.test(id))
+        return res.status(400).json({
+          error: "An outlet id uses letters, digits, hyphens and underscores.",
+        });
+      atomic(() => {
+        updateLead(lead.wa_id, { outlet_id: id || null });
+        audit(
+          "outlet_linked",
+          lead.wa_id,
+          { outlet_id: id || null },
+          "operator",
+        );
+      });
+      return res.json({ ok: true });
+    }
     if (action === "resume" && lead.state === "DECLINED")
       return res.status(409).json({
         error:
@@ -241,6 +294,98 @@ export function createApp({ workerStatus = () => ({ running: true }) } = {}) {
       cancelBooking(booking.id, { silent: true });
       audit("operator_cancel", booking.id, {}, "operator");
     });
+    res.json({ ok: true });
+  });
+  /**
+   * One import, with what an operator needs to judge it.
+   *
+   * The phrase list and activity profile are derived from the stored export on
+   * every request rather than written to their own table. Purging the export
+   * therefore purges them too, with nothing left behind to remember.
+   */
+  app.get("/api/imports/:id", (req, res) => {
+    const batch = getBatch(req.params.id);
+    if (!batch) return res.status(404).json({ error: "Import not found" });
+    const summary = batch.summary ? JSON.parse(batch.summary) : null;
+    const body = {
+      batch: { ...batch, raw: undefined, hasRaw: Boolean(batch.raw) },
+      summary,
+      lead: getLead(batch.wa_id),
+      phrases: {},
+      activity: {},
+    };
+    if (batch.raw) {
+      const { messages } = parseExport(batch.raw);
+      // Per author: the operator picks which one is the shop.
+      for (const { name } of summary?.authors ?? []) {
+        body.phrases[name] = phraseFrequency(messages, name, { limit: 40 });
+        body.activity[name] = activityProfile(messages, name);
+      }
+    }
+    res.json(body);
+  });
+  app.post("/api/imports/:id/:action", (req, res) => {
+    const batch = getBatch(req.params.id);
+    if (!batch) return res.status(404).json({ error: "Import not found" });
+    const action = req.params.action;
+    if (!["accept", "reject", "purge", "label"].includes(action))
+      return res.status(404).json({ error: "Unknown action" });
+    if (action === "purge") {
+      const changed = atomic(() => {
+        const n = purgeBatch(batch.id);
+        if (n)
+          audit("import_purged", batch.id, { reason: "operator" }, "operator");
+        return n;
+      });
+      if (!changed)
+        return res
+          .status(409)
+          .json({ error: "This import has already been purged." });
+      return res.json({ ok: true });
+    }
+    if (action === "label") {
+      const label = String(req.body?.supplierLabel || "").slice(0, 120);
+      atomic(() => {
+        updateBatch(batch.id, { supplier_label: label || null });
+        audit("import_labelled", batch.id, { label }, "operator");
+      });
+      return res.json({ ok: true });
+    }
+    if (batch.state !== "stored")
+      return res
+        .status(409)
+        .json({ error: "Only a stored import can be accepted or rejected." });
+    atomic(() => {
+      updateBatch(batch.id, {
+        state: action === "accept" ? "accepted" : "rejected",
+        reason: action === "accept" ? null : "operator",
+      });
+      audit("import_" + action + "ed", batch.id, {}, "operator");
+    });
+    res.json({ ok: true });
+  });
+  app.post("/api/contacts/:id/:action", (req, res) => {
+    const action = req.params.action;
+    if (!["accept", "reject"].includes(action))
+      return res.status(404).json({ error: "Unknown action" });
+    const changed = atomic(() => {
+      const n = setSupplierContactState(
+        req.params.id,
+        action === "accept" ? "accepted" : "rejected",
+      );
+      if (n)
+        audit(
+          "supplier_contact_" + action + "ed",
+          req.params.id,
+          {},
+          "operator",
+        );
+      return n;
+    });
+    if (!changed)
+      return res
+        .status(409)
+        .json({ error: "That contact has already been reviewed." });
     res.json({ ok: true });
   });
   app.get("/api/jobs", (_req, res) =>
