@@ -1,36 +1,12 @@
-import { cfg } from './config.js';
-import { sendText } from './whatsapp.js';
-
-const HOOK = process.env.NOTIFY_WEBHOOK;
-
-/**
- * Tells Samarth something happened.
- *
- * WhatsApp-to-owner only lands if the owner messaged the business number in the
- * last 24 hours, so a webhook (Slack, Discord, Telegram, n8n) is the reliable
- * channel. Console always gets it.
- */
-export async function notifyOwner(text, meta = {}) {
-  console.log('\n=== NOTIFY ===\n' + text + '\n==============\n');
-
-  if (HOOK) {
-    try {
-      await fetch(HOOK, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ text, ...meta }),
-        signal: AbortSignal.timeout(6000),
-      });
-    } catch (e) {
-      console.error('[notify] webhook failed:', e.message);
-    }
-  }
-
-  if (cfg.owner.whatsapp) {
-    try {
-      await sendText(cfg.owner.whatsapp, text);
-    } catch {
-      // Expected when the 24h window with your own number has closed. Not an error.
-    }
-  }
+import { randomUUID } from "node:crypto";
+import { cfg } from "./config.js";
+import { db, enqueue } from "./store.js";
+/** Always visible in the operator inbox. Webhook delivery is independently retried. */
+export function notifyOwner(body, { wa_id = null } = {}) {
+  const id = randomUUID();
+  db.prepare(
+    "INSERT INTO notifications(id,body,wa_id,created_at) VALUES (?,?,?,?)",
+  ).run(id, body, wa_id, Date.now());
+  if (cfg.notifyWebhook && !cfg.dryRun)
+    enqueue("notify", "notify", { text: body, wa_id }, "notify:" + id);
 }

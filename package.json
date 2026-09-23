@@ -1,20 +1,32 @@
 {
   "name": "ledger-booking-bot",
-  "version": "1.0.0",
+  "version": "2.0.0",
   "private": true,
   "type": "module",
-  "description": "WhatsApp booking bot for ReStock by Ledger. Books the 20-minute onboarding visit when a shop owner messages in.",
+  "description": "Reliable multilingual WhatsApp booking service with an operator desk, durable queues, Google Calendar synchronization, and optional OpenRouter intent classification.",
   "main": "src/server.js",
   "scripts": {
     "start": "node src/server.js",
     "dev": "node --watch src/server.js",
     "auth:google": "node scripts/google-auth.js",
     "simulate": "node scripts/simulate.js",
-    "leads": "node scripts/leads.js"
+    "leads": "node scripts/leads.js",
+    "demo": "node scripts/demo.js",
+    "test": "node --test --test-concurrency=1 test/*.test.js",
+    "check": "node scripts/check.js",
+    "backup": "node scripts/backup.js",
+    "format": "prettier --write src scripts public test README.md package.json compose.yaml .github/workflows/ci.yml",
+    "format:check": "prettier --check src scripts public test README.md package.json compose.yaml .github/workflows/ci.yml"
   },
   "dependencies": {
     "better-sqlite3": "^11.5.0",
     "dotenv": "^16.4.5",
     "express": "^4.21.1"
+  },
+  "engines": {
+    "node": ">=22 <23"
+  },
+  "devDependencies": {
+    "prettier": "3.6.2"
   }
 }

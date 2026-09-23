@@ -1,4 +1,11 @@
 node_modules/
 data/
 .env
+.env.*
+!.env.example
 *.log
+*.db
+*.db-wal
+*.db-shm
+coverage/
+.DS_Store

@@ -1,103 +1,111 @@
-import { cfg, calendarEnabled } from './config.js';
-import { slotEnd } from './slots.js';
-
+import { cfg, calendarEnabled } from "./config.js";
+import { request, ServiceError } from "./http.js";
 let cached = { token: null, expires: 0 };
-
 async function accessToken() {
-  if (cached.token && Date.now() < cached.expires - 30_000) return cached.token;
-  const res = await fetch('https://oauth2.googleapis.com/token', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-    body: new URLSearchParams({
-      client_id: cfg.google.clientId,
-      client_secret: cfg.google.clientSecret,
-      refresh_token: cfg.google.refreshToken,
-      grant_type: 'refresh_token',
-    }),
-  });
-  const j = await res.json();
-  if (!res.ok) throw new Error('Google token refresh failed: ' + JSON.stringify(j));
-  cached = { token: j.access_token, expires: Date.now() + j.expires_in * 1000 };
+  if (cached.token && Date.now() < cached.expires - 30000) return cached.token;
+  const j = await request(
+    "https://oauth2.googleapis.com/token",
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({
+        client_id: cfg.google.clientId,
+        client_secret: cfg.google.clientSecret,
+        refresh_token: cfg.google.refreshToken,
+        grant_type: "refresh_token",
+      }),
+    },
+    "Google authorization",
+  );
+  if (!j?.access_token) throw new ServiceError("Google authorization");
+  cached = {
+    token: j.access_token,
+    expires: Date.now() + Number(j.expires_in || 3600) * 1000,
+  };
   return cached.token;
 }
-
-/** Busy intervals over the lookahead window. Returns [] if calendar is off. */
-export async function freeBusy(from = new Date(), days = cfg.booking.lookahead + 1) {
+async function api(path, method = "GET", body) {
+  const token = await accessToken();
+  try {
+    return await request(
+      `https://www.googleapis.com/calendar/v3/${path}`,
+      {
+        method,
+        headers: {
+          Authorization: `Bearer ${token}`,
+          "Content-Type": "application/json",
+        },
+        ...(body ? { body: JSON.stringify(body) } : {}),
+      },
+      "Google Calendar",
+    );
+  } catch (e) {
+    if (e.status === 401) {
+      cached = { token: null, expires: 0 };
+      e.permanent = false;
+    }
+    throw e;
+  }
+}
+const events = () =>
+  `calendars/${encodeURIComponent(cfg.google.calendarId)}/events`;
+export async function freeBusy(
+  from = new Date(),
+  days = cfg.booking.lookahead + 1,
+) {
   if (!calendarEnabled) return [];
+  const j = await api("freeBusy", "POST", {
+    timeMin: from.toISOString(),
+    timeMax: new Date(from.getTime() + days * 86400000).toISOString(),
+    timeZone: cfg.booking.tz,
+    items: [{ id: cfg.google.calendarId }],
+  });
+  const calendar = j?.calendars?.[cfg.google.calendarId];
+  if (!calendar || calendar.errors?.length || !Array.isArray(calendar.busy))
+    throw new ServiceError("Calendar availability");
+  return calendar.busy;
+}
+export async function createEvent(booking, lead) {
+  if (!calendarEnabled) return;
+  const body = {
+    id: booking.calendar_id,
+    summary: `ReStock onboarding: ${lead.shop_name || "Shop visit"}`,
+    description: `WhatsApp: +${lead.wa_id}\nLanguage: ${lead.lang}`,
+    location: lead.shop_address || undefined,
+    start: { dateTime: booking.start, timeZone: cfg.booking.tz },
+    end: { dateTime: booking.end, timeZone: cfg.booking.tz },
+    extendedProperties: { private: { ledgerBookingId: booking.id } },
+    reminders: {
+      useDefault: false,
+      overrides: [{ method: "popup", minutes: 60 }],
+    },
+  };
   try {
-    const token = await accessToken();
-    const res = await fetch('https://www.googleapis.com/calendar/v3/freeBusy', {
-      method: 'POST',
-      headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        timeMin: from.toISOString(),
-        timeMax: new Date(from.getTime() + days * 86400_000).toISOString(),
-        timeZone: cfg.booking.tz,
-        items: [{ id: cfg.google.calendarId }],
-      }),
-    });
-    const j = await res.json();
-    if (!res.ok) throw new Error(JSON.stringify(j));
-    return j.calendars?.[cfg.google.calendarId]?.busy ?? [];
+    await api(events(), "POST", body);
   } catch (e) {
-    console.error('[calendar] freeBusy failed, offering slots unchecked:', e.message);
-    return [];
+    if (e.status !== 409) throw e;
+    const existing = await api(`${events()}/${booking.calendar_id}`);
+    if (
+      existing?.extendedProperties?.private?.ledgerBookingId !== booking.id ||
+      existing.status === "cancelled" ||
+      Date.parse(existing.start?.dateTime) !== Date.parse(booking.start) ||
+      Date.parse(existing.end?.dateTime) !== Date.parse(booking.end)
+    )
+      throw new ServiceError("Calendar event reconciliation", 409, true);
   }
 }
-
-/** Creates the onboarding event. Returns the event id, or null if calendar is off. */
-export async function createEvent({ start, waId, shopName, lang }) {
-  if (!calendarEnabled) return null;
-  try {
-    const token = await accessToken();
-    const title = shopName
-      ? `ReStock onboarding: ${shopName}`
-      : `ReStock onboarding: +${waId}`;
-    const res = await fetch(
-      `https://www.googleapis.com/calendar/v3/calendars/${encodeURIComponent(cfg.google.calendarId)}/events`,
-      {
-        method: 'POST',
-        headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          summary: title,
-          description:
-            `Booked automatically from WhatsApp.\n` +
-            `Contact: +${waId}\n` +
-            `Language: ${lang}\n\n` +
-            `Bring: supplier capture sheet, leave-behind flyer.\n` +
-            `Capture: suppliers + contacts, core items in their words, ordering rhythm, ` +
-            `who else orders, baseline ordering time, referral ask.`,
-          start: { dateTime: new Date(start).toISOString(), timeZone: cfg.booking.tz },
-          end: { dateTime: slotEnd(start).toISOString(), timeZone: cfg.booking.tz },
-          reminders: { useDefault: false, overrides: [{ method: 'popup', minutes: 60 }] },
-        }),
-      }
-    );
-    const j = await res.json();
-    if (!res.ok) throw new Error(JSON.stringify(j));
-    return j.id ?? null;
-  } catch (e) {
-    console.error('[calendar] createEvent failed:', e.message);
-    return null;
-  }
+export async function updateEvent(booking, lead) {
+  if (!calendarEnabled || !booking.calendar_id) return;
+  await api(`${events()}/${booking.calendar_id}`, "PATCH", {
+    summary: `ReStock onboarding: ${lead.shop_name || "Shop visit"}`,
+    location: lead.shop_address || "",
+  });
 }
-
-export async function updateEventTitle(eventId, shopName, address) {
-  if (!calendarEnabled || !eventId) return;
+export async function deleteEvent(booking) {
+  if (!calendarEnabled || !booking.calendar_id) return;
   try {
-    const token = await accessToken();
-    await fetch(
-      `https://www.googleapis.com/calendar/v3/calendars/${encodeURIComponent(cfg.google.calendarId)}/events/${eventId}`,
-      {
-        method: 'PATCH',
-        headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          summary: `ReStock onboarding: ${shopName}`,
-          location: address || undefined,
-        }),
-      }
-    );
+    await api(`${events()}/${booking.calendar_id}`, "DELETE");
   } catch (e) {
-    console.error('[calendar] updateEventTitle failed:', e.message);
+    if (![404, 410].includes(e.status)) throw e;
   }
 }
